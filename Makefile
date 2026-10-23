@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -std=c11
-TARGET = ccrypt
+TARGET = src/ccrypt
 SOURCE = src/ccrypt.c
 
 all: $(TARGET)
