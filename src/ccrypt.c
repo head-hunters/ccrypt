@@ -1,4 +1,7 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
@@ -7,10 +10,12 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/crypto.h>
 
 #include <argon2.h>
 
 #define BUFFER_SIZE 4096
+#define TEMPLATE_SIZE 8
 #define SALT_SIZE 16
 #define KEY_SIZE 32
 #define PWD_SIZE 128
@@ -196,12 +201,11 @@ int encrypt_file(const char *source, const char *destination)
 {
 
     int status = 1;
+    int renamed = 0;
 
-    if (strcmp(source, destination) == 0)
-    {
-        fprintf(stderr, "The source and destination file cannot be the same\n");
-        goto cleanup;
-    }
+    char *template = NULL;
+    int tmp = -1;
+    size_t template_size = strlen(destination) + TEMPLATE_SIZE; // size of the temp file
 
     EVP_CIPHER_CTX *ctx = NULL;
     unsigned char salt[SALT_SIZE];
@@ -216,6 +220,12 @@ int encrypt_file(const char *source, const char *destination)
     FILE *plain_ptr = NULL;   // source
     FILE *encrypt_ptr = NULL; // destination
 
+    if (strcmp(source, destination) == 0)
+    {
+        fprintf(stderr, "The source and destination file cannot be the same\n");
+        goto cleanup;
+    }
+
     // Initialise the cipher
     if (init_encryption(&ctx, salt, nonce) != 0)
     {
@@ -223,20 +233,36 @@ int encrypt_file(const char *source, const char *destination)
         goto cleanup;
     }
 
-    // Open Source and Destination files
+    // Open Source
     plain_ptr = fopen(source, "rb");
     if (plain_ptr == NULL)
     {
         perror("Invalid source filename or the source file doesn't exist");
         goto cleanup;
     }
-    encrypt_ptr = fopen(destination, "wb");
+
+    // Allocating memory for a temp file + Creating a temp file
+    template = malloc(template_size);
+    if (template == NULL)
+    {
+        fprintf(stderr, "Failed to allocate memory for temporary file");
+        goto cleanup;
+    }
+    snprintf(template, template_size, "%s.XXXXXX", destination); // Adds new temp file definition to the template buffer
+    tmp = mkstemp(template);
+    if (tmp == -1)
+    {
+        perror("Error creating file stream");
+        goto cleanup;
+    }
+    encrypt_ptr = fdopen(tmp, "wb");
 
     if (encrypt_ptr == NULL)
     {
-        perror("Invalid destination filename or the destination file doesn't exist");
+        perror("Failed stream creation");
         goto cleanup;
     }
+    tmp = -1;
 
     // Write salt and nonce to Destination
     if (fwrite(salt, 1, SALT_SIZE, encrypt_ptr) != SALT_SIZE)
@@ -316,9 +342,23 @@ int encrypt_file(const char *source, const char *destination)
         goto cleanup;
     }
 
+    // Renaming the temp file
+    if (rename(template, destination) != 0)
+    {
+        perror("Error renaming temp file to destination");
+        goto cleanup;
+    }
+
+    renamed = 1; // successful renaming
+
     status = 0;
+
 cleanup:
-    EVP_CIPHER_CTX_free(ctx);
+    if (tmp != -1) // closing file descriptor if fdopen failed
+    {
+        close(tmp);
+    }
+
     if (plain_ptr != NULL)
     {
         fclose(plain_ptr);
@@ -329,6 +369,18 @@ cleanup:
         fclose(encrypt_ptr);
         encrypt_ptr = NULL;
     }
+
+    if (renamed == 0 && template != NULL) // (unsuccessful renaming) as after successful renaming template is moved
+    {
+
+        if (unlink(template) == -1) // removes temp file
+        {
+            perror("Error unlinking temp file");
+        }
+    }
+    free(template); // frees template string buffer
+    template = NULL;
+    EVP_CIPHER_CTX_free(ctx);
 
     return status;
 }
