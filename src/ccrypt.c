@@ -1,4 +1,5 @@
 #include "encrypt.h"
+#include "decrypt.h"
 #include "dumper.h"
 
 int main(int argc, char *argv[])
@@ -33,7 +34,15 @@ int main(int argc, char *argv[])
     {
         if (encrypt_file(argv[2], argv[3]) != 0)
         {
-            fprintf(stderr, "Encryption Failed");
+            return 1;
+        }
+    }
+
+    // Decryption
+    if (strcmp(argv[1], "-d") == 0)
+    {
+        if (decrypt_file(argv[2], argv[3]) != 0)
+        {
             return 1;
         }
     }

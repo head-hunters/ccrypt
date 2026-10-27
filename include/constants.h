@@ -8,5 +8,6 @@
 #define PWD_SIZE 128
 #define NONCE_SIZE 12
 #define TAG_SIZE 16
+#define MIN_FILE_SIZE (SALT_SIZE + NONCE_SIZE + TAG_SIZE)
 
 #endif

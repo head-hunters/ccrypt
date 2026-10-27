@@ -130,7 +130,7 @@ int init_encryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
         goto cleanup;
     }
 
-    // cipher initialisation
+    // decryption initialisation
     if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, nonce) != 1)
     {
         fprintf(stderr, "Error initialising encryption\n");
@@ -212,10 +212,17 @@ int encrypt_file(const char *source, const char *destination)
     FILE *plain_ptr = NULL;   // source
     FILE *encrypt_ptr = NULL; // destination
 
-    // Initialise the cipher
+    // Validating args
+    if (source == NULL || destination == NULL)
+    {
+        fprintf(stderr, "Invalid source or destination\n");
+        return 1;
+    }
+
+    // Initialise the encryption context
     if (init_encryption(&ctx, salt, nonce) != 0)
     {
-        fprintf(stderr, "Error initialising the cipher");
+        fprintf(stderr, "Error initialising the encryption context");
         goto cleanup;
     }
 
@@ -294,9 +301,9 @@ int encrypt_file(const char *source, const char *destination)
     }
 
     // Writing leftover bytes from output_buffer after finalisation
-    if (fwrite(output_buffer, 1, output_length, encrypt_ptr) != (size_t)output_length)
+    if (fwrite(output_buffer, 1, (size_t)output_length, encrypt_ptr) != (size_t)output_length)
     {
-        perror("Error writing to destination file");
+        perror("Error writing final bytes to destination file");
         goto cleanup;
     }
 
