@@ -1,0 +1,211 @@
+#!/usr/bin/expect -f
+
+# Usage:
+#   interrupt.exp CCRYPT encrypt|decrypt SOURCE DEST EXPECTED_PROMPTS PASSWORD...
+
+set timeout 120
+log_user 0
+
+if {$argc < 5} {
+    puts stderr "usage: interrupt.exp CCRYPT encrypt|decrypt SOURCE DEST EXPECTED_PROMPTS PASSWORD..."
+    exit 2
+}
+
+set exe [lindex $argv 0]
+set mode [lindex $argv 1]
+set source [lindex $argv 2]
+set dest [lindex $argv 3]
+set expected_prompts [lindex $argv 4]
+set passwords [lrange $argv 5 end]
+
+if {![string is integer -strict $expected_prompts] || $expected_prompts < 0} {
+    puts stderr "EXPECTED_PROMPTS must be a nonnegative integer"
+    exit 2
+}
+if {[llength $passwords] != $expected_prompts} {
+    puts stderr "password count does not match EXPECTED_PROMPTS"
+    exit 2
+}
+
+if {$mode eq "encrypt"} {
+    set option "-e"
+    set progress_pattern {Encryption Progress: \[}
+} elseif {$mode eq "decrypt"} {
+    set option "-d"
+    set progress_pattern {Decryption Progress: \[}
+} else {
+    puts stderr "mode must be encrypt or decrypt"
+    exit 2
+}
+
+proc abort_child {pid spawnid message} {
+    # Kill the exact spawned child, then drain and reap only its spawn ID.
+    # SIGKILL also terminates it if an earlier error left it stopped.
+    if {[string is integer -strict $pid] && $pid > 0} {
+        catch {exec kill -KILL $pid}
+    }
+    catch {expect -i $spawnid eof}
+    catch {wait -i $spawnid}
+    puts stderr $message
+    exit 2
+}
+
+proc check_terminal_echo {tty pid spawnid} {
+    if {[catch {exec stty -a < $tty} state]} {
+        abort_child $pid $spawnid "could not inspect spawned terminal: $state"
+    }
+    if {[regexp {(^|[[:space:];])-echo([[:space:];]|$)} $state]} {
+        abort_child $pid $spawnid "terminal echo is disabled after password entry"
+    }
+    if {![regexp {(^|[[:space:];])echo([[:space:];]|$)} $state]} {
+        abort_child $pid $spawnid "could not confirm terminal echo is enabled"
+    }
+}
+
+# Expect 5.45.4 does not populate spawn_out(pid); its documented spawn return
+# value is the UNIX PID. Prefer spawn_out(pid) where available, with that
+# documented return value as the compatibility fallback.
+set spawn_result [spawn -noecho $exe $option $source $dest]
+set ccrypt_spawn_id $spawn_id
+if {[info exists spawn_out(pid)]} {
+    set ccrypt_pid $spawn_out(pid)
+} else {
+    set ccrypt_pid $spawn_result
+}
+if {![string is integer -strict $ccrypt_pid] || $ccrypt_pid <= 0} {
+    abort_child $spawn_result $ccrypt_spawn_id "could not obtain ccrypt process PID"
+}
+
+# The slave path is kept while the child has the PTY open. Inspect it while
+# ccrypt is stopped at the progress event, before it exits and the path goes away.
+if {![info exists spawn_out(slave,name)]} {
+    abort_child $ccrypt_pid $ccrypt_spawn_id "Expect did not provide the PTY slave name"
+}
+set slave_tty $spawn_out(slave,name)
+set prompt_count 0
+
+if {$mode eq "encrypt"} {
+    expect {
+        -exact "Enter Encryption Password: " {
+            if {$prompt_count >= [llength $passwords]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "received too many password prompts"
+            }
+            send -- "[lindex $passwords $prompt_count]\r"
+            incr prompt_count
+            exp_continue
+        }
+        -exact "Confirm Password: " {
+            if {$prompt_count >= [llength $passwords]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "received too many password prompts"
+            }
+            send -- "[lindex $passwords $prompt_count]\r"
+            incr prompt_count
+            exp_continue
+        }
+        -re $progress_pattern {
+            if {$prompt_count != $expected_prompts} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id \
+                    "encryption progress appeared after an unexpected prompt count"
+            }
+            if {[catch {exec kill -STOP $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not stop ccrypt: $message"
+            }
+            check_terminal_echo $slave_tty $ccrypt_pid $ccrypt_spawn_id
+            if {[catch {exec kill -INT $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not send SIGINT to ccrypt: $message"
+            }
+            if {[catch {exec kill -CONT $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not resume ccrypt: $message"
+            }
+        }
+        timeout {
+            abort_child $ccrypt_pid $ccrypt_spawn_id "timed out waiting for encryption progress"
+        }
+        eof {
+            abort_child $ccrypt_pid $ccrypt_spawn_id \
+                "ccrypt exited before encryption progress appeared"
+        }
+    }
+} else {
+    expect {
+        -exact "Enter Decryption Password: " {
+            if {$prompt_count >= [llength $passwords]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "received too many password prompts"
+            }
+            send -- "[lindex $passwords $prompt_count]\r"
+            incr prompt_count
+            exp_continue
+        }
+        -re $progress_pattern {
+            if {$prompt_count != $expected_prompts} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id \
+                    "decryption progress appeared after an unexpected prompt count"
+            }
+            if {[catch {exec kill -STOP $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not stop ccrypt: $message"
+            }
+            check_terminal_echo $slave_tty $ccrypt_pid $ccrypt_spawn_id
+            if {[catch {exec kill -INT $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not send SIGINT to ccrypt: $message"
+            }
+            if {[catch {exec kill -CONT $ccrypt_pid} message]} {
+                abort_child $ccrypt_pid $ccrypt_spawn_id "could not resume ccrypt: $message"
+            }
+        }
+        timeout {
+            abort_child $ccrypt_pid $ccrypt_spawn_id "timed out waiting for decryption progress"
+        }
+        eof {
+            abort_child $ccrypt_pid $ccrypt_spawn_id \
+                "ccrypt exited before decryption progress appeared"
+        }
+    }
+}
+
+if {$prompt_count != $expected_prompts} {
+    abort_child $ccrypt_pid $ccrypt_spawn_id \
+        "expected $expected_prompts password prompts, received $prompt_count"
+}
+
+# Require the cursor-show sequence emitted from the cleanup path after SIGINT.
+set cursor_restore "\033\[?25h"
+set cursor_restored 0
+expect {
+    -exact $cursor_restore {
+        set cursor_restored 1
+        exp_continue
+    }
+    eof {}
+    timeout {
+        abort_child $ccrypt_pid $ccrypt_spawn_id "timed out waiting for ccrypt cleanup"
+    }
+}
+
+set wait_result [wait -i $ccrypt_spawn_id]
+if {[llength $wait_result] < 4} {
+    puts stderr "unexpected ccrypt wait result: $wait_result"
+    exit 2
+}
+
+set os_error [lindex $wait_result 2]
+set child_status [lindex $wait_result 3]
+if {$os_error != 0} {
+    puts stderr "error waiting for ccrypt: $wait_result"
+    exit 2
+}
+if {[llength $wait_result] > 4} {
+    if {[lindex $wait_result 4] eq "CHILDKILLED"} {
+        puts stderr "ccrypt terminated abnormally by signal [lindex $wait_result 5]"
+        exit 1
+    }
+    puts stderr "unexpected extra fields in ccrypt wait result: $wait_result"
+    exit 2
+}
+if {$child_status != 1} {
+    puts stderr "expected normal ccrypt exit status 1 after interruption, got $child_status"
+    exit 1
+}
+if {!$cursor_restored} {
+    puts stderr "ccrypt did not emit the cursor-restore sequence"
+    exit 1
+}

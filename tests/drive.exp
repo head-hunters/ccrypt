@@ -1,0 +1,108 @@
+#!/usr/bin/expect -f
+
+# Usage:
+#   drive.exp CCRYPT success|failure OPTION SOURCE DEST EXPECTED_PROMPTS PASSWORD...
+#
+# Encryption consumes two password prompts per file: password and confirmation.
+# Decryption consumes one password prompt per file.
+
+set timeout 60
+
+if {$argc < 6} {
+    puts stderr "usage: drive.exp CCRYPT success|failure OPTION SOURCE DEST EXPECTED_PROMPTS PASSWORD..."
+    exit 2
+}
+
+set exe [lindex $argv 0]
+set expected [lindex $argv 1]
+set option [lindex $argv 2]
+set source [lindex $argv 3]
+set dest [lindex $argv 4]
+set expected_prompts [lindex $argv 5]
+set passwords [lrange $argv 6 end]
+
+if {![string is integer -strict $expected_prompts] || $expected_prompts < 0} {
+    puts stderr "EXPECTED_PROMPTS must be a nonnegative integer"
+    exit 2
+}
+if {[llength $passwords] != $expected_prompts} {
+    puts stderr "password count does not match EXPECTED_PROMPTS"
+    exit 2
+}
+
+spawn $exe $option $source $dest
+
+set index 0
+expect {
+    -exact "Enter Encryption Password: " {
+        if {$index >= [llength $passwords]} {
+            puts stderr "received more password prompts than expected"
+            exit 2
+        }
+        send -- "[lindex $passwords $index]\r"
+        incr index
+        exp_continue
+    }
+    -exact "Confirm Password: " {
+        if {$index >= [llength $passwords]} {
+            puts stderr "received more password prompts than expected"
+            exit 2
+        }
+        send -- "[lindex $passwords $index]\r"
+        incr index
+        exp_continue
+    }
+    -exact "Enter Decryption Password: " {
+        if {$index >= [llength $passwords]} {
+            puts stderr "received more password prompts than expected"
+            exit 2
+        }
+        send -- "[lindex $passwords $index]\r"
+        incr index
+        exp_continue
+    }
+    timeout {
+        puts stderr "timed out waiting for ccrypt"
+        exit 2
+    }
+    eof {}
+}
+
+set wait_result [wait]
+if {[llength $wait_result] < 4} {
+    puts stderr "unexpected ccrypt wait result: $wait_result"
+    exit 2
+}
+
+# Expect 5.45.4 returns pid, spawn id, OS error flag, and child status.
+# Signal deaths add CHILDKILLED followed by the signal name and description.
+set os_error [lindex $wait_result 2]
+set child_status [lindex $wait_result 3]
+
+if {$os_error != 0} {
+    puts stderr "error waiting for ccrypt: $wait_result"
+    exit 2
+}
+
+if {$index != $expected_prompts} {
+    puts stderr "expected $expected_prompts password prompts, received $index"
+    exit 1
+}
+
+if {[llength $wait_result] > 4} {
+    if {[lindex $wait_result 4] eq "CHILDKILLED"} {
+        puts stderr "ccrypt terminated by signal [lindex $wait_result 5]: [lindex $wait_result 6]"
+        exit 1
+    }
+    puts stderr "unexpected extra fields in ccrypt wait result: $wait_result"
+    exit 2
+}
+
+if {$expected eq "success" && $child_status != 0} {
+    puts stderr "expected normal exit 0, got exit status $child_status"
+    exit 1
+}
+if {$expected eq "failure" && $child_status == 0} {
+    puts stderr "expected normal nonzero exit, got exit status 0"
+    exit 1
+}
