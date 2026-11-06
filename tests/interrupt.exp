@@ -1,4 +1,5 @@
 #!/usr/bin/expect -f
+# Tests written using OPENAI Codex
 
 # Usage:
 #   interrupt.exp CCRYPT encrypt|decrypt SOURCE DEST EXPECTED_PROMPTS PASSWORD...

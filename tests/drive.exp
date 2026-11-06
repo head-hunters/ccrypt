@@ -1,4 +1,5 @@
 #!/usr/bin/expect -f
+# Tests written using OPENAI Codex
 
 # Usage:
 #   drive.exp CCRYPT success|failure OPTION SOURCE DEST EXPECTED_PROMPTS PASSWORD...
