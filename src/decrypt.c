@@ -1,4 +1,5 @@
 #include "decrypt.h"
+#include "helpers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,11 +12,10 @@
 #include <openssl/crypto.h>
 
 #include <argon2.h>
-#include <termios.h>
 
 int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], unsigned char nonce[NONCE_SIZE]) // output params filling the caller's variables
 {
-    // checking pointers
+    // validating pointers
     if (ctx_out == NULL || salt == NULL || nonce == NULL)
     {
         fprintf(stderr, "Invalid initialisation parameters\n");
@@ -23,9 +23,7 @@ int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
     }
     *ctx_out = NULL;
 
-    struct termios old_tty;
-    int echo_disabled = 0; // to ensure terminal settings are only restored if echo was successfully disabled
-    int status = 1;        // tracking if the function was successful
+    int status = 1; // tracking if the function was successful
 
     EVP_CIPHER_CTX *ctx = NULL;
 
@@ -36,67 +34,11 @@ int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
     unsigned char pwd[PWD_SIZE] = {0};
     unsigned char key[KEY_SIZE] = {0};
 
-    // Accepting user password
-
-    // getting terminal attributes
-    if (tcgetattr(STDIN_FILENO, &old_tty) == -1)
+    // Accepting decryption password
+    if (read_password(pwd, "Enter Decryption Password: ") != 0)
     {
-        perror("Error saving terminal settings");
-        return 1;
-    }
-    struct termios tty = old_tty;
-    tty.c_lflag &= ~ECHO;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &tty) == -1)
-    {
-        perror("Error disabling ECHO");
-        return 1;
-    }
-    echo_disabled = 1;
-
-    printf("Enter Decryption Password: ");
-    fflush(stdout);
-
-    if (fgets((char *)pwd, PWD_SIZE, stdin) == NULL)
-    {
-        fprintf(stderr, "Error reading password\n");
-
         goto cleanup;
     }
-
-    char *newline = strchr((char *)pwd, '\n');
-    if (newline != NULL)
-    {
-        *newline = '\0';
-    }
-    else
-    {
-        int ch = getchar(); // reads the next character in stdin not taken by fgets
-        if (ch != EOF && ch != '\n')
-        {
-            while (ch != EOF && ch != '\n')
-            {
-                ch = getchar(); // Release the rest of the input
-            }
-            fprintf(stderr, "Password is too large!\n");
-
-            goto cleanup;
-        }
-        if (ch == EOF && ferror(stdin))
-        {
-            fprintf(stderr, "\nError reading password\n");
-
-            goto cleanup;
-        }
-    }
-
-    if (pwd[0] == '\0')
-    {
-        fprintf(stderr, "Password cannot be empty\n");
-        goto cleanup;
-    }
-
-    printf("\n");
 
     // generating key
     int result = argon2id_hash_raw(t_cost, m_cost, parallelism, pwd, strlen((char *)pwd), salt, SALT_SIZE, key, KEY_SIZE);
@@ -105,7 +47,6 @@ int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
         fprintf(stderr, "Error generating Key: %s\n", argon2_error_message(result));
         goto cleanup;
     }
-    OPENSSL_cleanse(pwd, sizeof(pwd));
 
     // creating a decryption context
     ctx = EVP_CIPHER_CTX_new();
@@ -122,17 +63,6 @@ int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
         goto cleanup;
     }
 
-    // restore terminal settings before passing context
-    if (echo_disabled)
-    {
-        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_tty) == -1)
-        {
-            perror("Error restoring terminal settings");
-            goto cleanup;
-        }
-        echo_disabled = 0; // so that restoration doesn't happen twice
-    }
-
     // pass the initialised context to the caller
     *ctx_out = ctx;
     ctx = NULL;
@@ -140,14 +70,7 @@ int init_decryption(EVP_CIPHER_CTX **ctx_out, unsigned char salt[SALT_SIZE], uns
     status = 0;
 
 cleanup:
-    if (echo_disabled)
-    {
-        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_tty) == -1)
-        {
-            perror("Error restoring terminal settings");
-            status = 1;
-        }
-    }
+
     EVP_CIPHER_CTX_free(ctx);
     OPENSSL_cleanse(pwd, sizeof(pwd));
     OPENSSL_cleanse(key, sizeof(key));
@@ -168,7 +91,7 @@ int decrypt(EVP_CIPHER_CTX *ctx, unsigned char *output_buffer, int *output_lengt
     }
     if (EVP_DecryptUpdate(ctx, output_buffer, output_length, input_buffer, (int)input_length) != 1)
     {
-        fprintf(stderr, "Error decrypting chunk");
+        fprintf(stderr, "Error decrypting chunk\n");
         return 1;
     }
     return 0;
@@ -176,6 +99,13 @@ int decrypt(EVP_CIPHER_CTX *ctx, unsigned char *output_buffer, int *output_lengt
 
 int decrypt_file(const char *source, const char *destination)
 {
+
+    // Validating args
+    if (source == NULL || destination == NULL)
+    {
+        fprintf(stderr, "Invalid source or destination\n");
+        return 1;
+    }
 
     int status = 1;
     int renamed = 0;
@@ -197,13 +127,6 @@ int decrypt_file(const char *source, const char *destination)
     FILE *encrypt_ptr = NULL; // source
     FILE *decrypt_ptr = NULL; // destination
 
-    // Validating args
-    if (source == NULL || destination == NULL)
-    {
-        fprintf(stderr, "Invalid source or destination\n");
-        return 1;
-    }
-
     // Open Source (Encrypted File)
     encrypt_ptr = fopen(source, "rb");
     if (encrypt_ptr == NULL)
@@ -215,25 +138,25 @@ int decrypt_file(const char *source, const char *destination)
     // Calculating the size of the file
     if (fseeko(encrypt_ptr, 0L, SEEK_END) != 0)
     {
-        fprintf(stderr, "Error placing file pointer at the end of file");
+        fprintf(stderr, "Error placing file pointer at the end of file\n");
         goto cleanup;
     }
     off_t size = ftello(encrypt_ptr);
     if (size == (off_t)-1)
     {
-        fprintf(stderr, "Error calculating file size");
+        fprintf(stderr, "Error calculating file size\n");
         goto cleanup;
     }
     if (size < (off_t)MIN_FILE_SIZE)
     {
-        fprintf(stderr, "File size is too small");
+        fprintf(stderr, "Decryption failed: invalid encrypted file format or truncated file.\n");
         goto cleanup;
     }
 
     // Reading salt and nonce
     if (fseeko(encrypt_ptr, 0, SEEK_SET) != 0)
     {
-        fprintf(stderr, "Error rewinding file pointer");
+        fprintf(stderr, "Error rewinding file pointer\n");
         goto cleanup;
     }
     size_t bytes_read = fread(salt, 1, SALT_SIZE, encrypt_ptr);
@@ -246,7 +169,7 @@ int decrypt_file(const char *source, const char *destination)
         }
         else
         {
-            fprintf(stderr, "Unexpected EOF while reading salt");
+            fprintf(stderr, "Unexpected EOF while reading salt\n");
             goto cleanup;
         }
     }
@@ -260,7 +183,7 @@ int decrypt_file(const char *source, const char *destination)
         }
         else
         {
-            fprintf(stderr, "Unexpected EOF while reading nonce");
+            fprintf(stderr, "Unexpected EOF while reading nonce\n");
             goto cleanup;
         }
     }
@@ -268,7 +191,7 @@ int decrypt_file(const char *source, const char *destination)
     // Initialising decryption context
     if (init_decryption(&ctx, salt, nonce) != 0)
     {
-        fprintf(stderr, "Error initialising the decryption context ");
+        fprintf(stderr, "Error initialising the decryption context\n");
         goto cleanup;
     }
 
@@ -276,7 +199,7 @@ int decrypt_file(const char *source, const char *destination)
     template = malloc(template_size);
     if (template == NULL)
     {
-        fprintf(stderr, "Failed to allocate memory for temporary file");
+        fprintf(stderr, "Failed to allocate memory for temporary file\n");
         goto cleanup;
     }
     snprintf(template, template_size, "%s.XXXXXX", destination); // Adds new temp file definition to the template buffer
@@ -297,11 +220,20 @@ int decrypt_file(const char *source, const char *destination)
 
     // Read Ciphertext (Source)
 
-    off_t remaining_size = size - (off_t)MIN_FILE_SIZE;
+    off_t ciphertext_size = size - (off_t)MIN_FILE_SIZE; // ciphertext size
+    off_t remaining_size = ciphertext_size;
     size_t chunk_size;
 
+    size_t processed = 0;
+    float percentage = 0;
     while (remaining_size > 0)
     {
+        // If ctrl+c is invoked
+        if (interrupted == 1)
+        {
+            goto cleanup;
+        }
+
         // only read either BUFFER_SIZE amount of bytes or what's below it
         if (remaining_size > BUFFER_SIZE)
         {
@@ -324,24 +256,50 @@ int decrypt_file(const char *source, const char *destination)
             }
             else
             {
-                fprintf(stderr, "Unexpected EOF while reading source");
+                fprintf(stderr, "Unexpected EOF while reading source\n");
                 goto cleanup;
             }
         }
         // Decrypt chunks
         if (decrypt(ctx, output_buffer, &output_length, input_buffer, input_length) != 0)
         {
-            fprintf(stderr, "File Decryption has failed.");
+            fprintf(stderr, "File Decryption has failed\n");
             goto cleanup;
         }
         // Write Decrypted chunks to Destination from the output buffer
         if (fwrite(output_buffer, 1, output_length, decrypt_ptr) != (size_t)output_length)
         {
-            perror("Error writing to destination file");
+            perror("Error writing to destination file\n");
             goto cleanup;
         }
+
+        // Progress bar Implementation
+        fprintf(stderr, "\033[?25l"); // Hide cursor
+        processed += input_length;
+        percentage = (float)processed / ciphertext_size;
+
+        const int width = 25;
+        int filled = percentage * width;
+
+        fprintf(stderr, "\rDecryption Progress: [");
+
+        for (int i = 0; i < filled; i++)
+        {
+            fprintf(stderr, "#");
+        }
+        for (int i = filled; i < width; i++)
+        {
+            fprintf(stderr, " ");
+        }
+        fprintf(stderr, "] %.1f%%", percentage * 100);
+
+        fflush(stderr);
+
         remaining_size -= input_length; // updating the number of ciphertext bytes left to be read
     }
+    fprintf(stderr, "\n");
+    fprintf(stderr, "\033[?25h"); // Show cursor
+
     if (ferror(encrypt_ptr))
     {
         perror("Error reading the source file");
@@ -359,7 +317,7 @@ int decrypt_file(const char *source, const char *destination)
         }
         else
         {
-            fprintf(stderr, "Unexpected EOF while reading tag");
+            fprintf(stderr, "Unexpected EOF while reading tag\n");
             goto cleanup;
         }
     }
@@ -400,6 +358,11 @@ int decrypt_file(const char *source, const char *destination)
         goto cleanup;
     }
 
+    if (interrupted == 1)
+    {
+        goto cleanup;
+    }
+
     // Renaming the temp file
     if (rename(template, destination) != 0)
     {
@@ -412,6 +375,8 @@ int decrypt_file(const char *source, const char *destination)
     status = 0;
 
 cleanup:
+    fprintf(stderr, "\033[?25h"); // Show cursor
+
     if (tmp != -1) // closing file descriptor if fdopen failed
     {
         close(tmp);
